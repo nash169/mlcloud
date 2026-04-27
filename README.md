@@ -1,55 +1,117 @@
-# Jupyter mlcloud
-Some script to use the mlcloud cluster via jupyter-lab(notebook).
+# MLCLOUD
+Scripts for using the MLCloud cluster with JupyterLab.
+https://portal.mlcloud.uni-tuebingen.de/user-guide/
 
-## Step 1 (Server)
-Under the `$HOME` directory (e.g., `/home/<prof-name>/<your-id>/`), copy the private key you have authorized into the `.ssh` folder (i.e., `$HOME/.ssh`).
+## Server Setup
+### SSH Keys
+Under the `$HOME` directory (e.g., `/home/<group>/<your-id>/`), copy the private key you have authorized into the `.ssh` folder (i.e., `$HOME/.ssh`).
 This step is necessary to manually log in to the computational node from the login node.
 
-## Step 2 (Server)
-Copy the `notebook.sh` script into your `$WORK` directory (e.g., `/mnt/lustre/work/<prof-name>/<your-id>`).
-`notebook.sh` is a standard SBATCH script that allocates resources.
-Here are the settings:
+### Setup .bashrc
+For Galvani, set `$WORK`:
 ```sh
-#SBATCH --job-name=notebook                                                     # Job name
-#SBATCH --ntasks=1                                                              # Number of tasks
-#SBATCH --cpus-per-task=8                                                       # Number of CPU cores per task
-#SBATCH --nodes=1                                                               # Ensure that all cores are on the same machine with nodes=1
-#SBATCH --partition=<node-partition>                                            # Which partition will run your job
-#SBATCH --time=0-01:00                                                          # Allowed runtime in D-HH:MM
-#SBATCH --gres=gpu:1                                                            # (optional) Requesting type and number of GPUs
-#SBATCH --mem=32G                                                               # Total memory pool for all cores (see also --mem-per-cpu); exceeding this number will cause your job to fail.
-#SBATCH --output=/mnt/lustre/work/<prof-name>/<your-id>/logs/myjob-%j.out       # File to which STDOUT will be written - make sure this is not on $HOME
-#SBATCH --error=/mnt/lustre/work/<prof-name>/<your-id>/logs/myjob-%j.err        # File to which STDERR will be written - make sure this is not on $HOME
-#SBATCH --mail-type=ALL                                                         # Type of email notification- BEGIN,END,FAIL,ALL
-#SBATCH --mail-user=<your-email>                                                # Email to which notifications will be sent
+export WORK="/mnt/lustre/work/<group>/<user>"
+```
+It is also helpful to keep local installations and config files in that directory:
+```sh
+export XDG_CONFIG_HOME=$WORK/.config/
+export XDG_CACHE_HOME=$WORK/.cache/
+export XDG_DATA_HOME=$WORK/.local/share/
+export XDG_STATE_HOME=$WORK/.local/state/
+```
+Then add local executables to `$PATH`:
+```sh
+if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]
+then
+    PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+fi
+export PATH
+```
+You may also need to add CUDA binaries to `$PATH`:
+```sh
+PATH=$PATH:/usr/local/cuda/bin
+```
+It is also important to set the directory for your logs:
+```sh
+export LOGDIR="/path/to/logs"
+```
+Useful aliases:
+```sh
+alias v='nvim'
+alias q='squeue --me'
+alias p='sinfo -S+P -o "%18P %8a %20F"'
+alias g='scontrol show node | grep "CfgTRES.*gres"'
 ```
 
-As a safety measure, set a reasonable maximum time (currently set to 1 hour) so that even if you forget to close the Jupyter Notebook manually, the session will automatically terminate without leaving a job running for days.
-Set the `node-partition` (e.g., `a100-galvani`), as well as your professor's name and your ID, to specify the paths for the log and error directories.
-These files will be used to extract the Jupyter Notebook link.
-Additionally, you can specify your email to receive notifications when the job starts and ends.
-The last part of the script activates the local Python [`uv`](https://docs.astral.sh/uv/) virtual environment and starts the Jupyter Notebook:
+### Essentials (neovim, uv, tmux, rsync)
 ```sh
-cd $WORK/<repo> && source .venv/bin/activate && jupyter-lab --no-browser --port 8080
+curl -LsSf https://astral.sh/uv/install.sh | sh
+echo 'eval "$(uv generate-shell-completion bash)"' >> ~/.bashrc
 ```
-Adjust this part depending on your Python setup.
-
-## Step 4 (Client)
-Add the following alias to your local `.bashrc` or `.zshrc` file:
 ```sh
-jupyter-mlcloud() {
-  JOB_ID=$(echo $(ssh -t <your-id>@<cluster-login-node> -p <port> 'sbatch $WORK/notebook.sh') | grep -o '[0-9]\+')
-  sleep 3s
-  NODE_HOST=$(echo $(ssh -t <your-id>@<cluster-login-node> -p <port> 'squeue --me') | grep -o '\bgalvani[^ ]*' | tr -cd '[:print:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  sleep 5s
-  JUPYTER_URL=$(ssh -t <your-id>@<cluster-login-node> -p <port> "grep -E '^[[:space:]]*http://localhost:8080/' /mnt/lustre/work/<prof-name>/<your-id>/logs/myjob-${JOB_ID}.err" \
-    | sed 's/^[[:space:]]*//')
-  echo -e "\e[1;32m${JUPYTER_URL}\e[0m"
-  ssh -AtL 8080:localhost:8080 <your-id>@<cluster-login-node> -p <port> "ssh -AtL 8080:localhost:8080 <your-id>@$NODE_HOST bash"
-}
+wget https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz
+```
+For a Neovim release built with an older glibc, go [here](https://github.com/neovim/neovim-releases).
+
+## Client Setup
+Move the `mlcloud` script into a standard executable location, for example `~/.local/bin/`.
+Then source it from your `.bashrc` or `.zshrc`:
+
+```sh
+source ~/.local/bin/mlcloud
 ```
 
-Replace all placeholders enclosed in `<>` with your actual information.
-The script automatically runs `notebook.sh` on the login node, fetches the computational node ID and the Jupyter Notebook link, and then SSHs into the computational node via the login node, tunneling port `8080` twice to enable access to Jupyter in your browser.
-The fetched Jupyter Notebook link will be printed in the terminal.  
-Simply copy and paste it into your browser to start working.
+To run jobs on the cluster, you need a config file that defines the requested resources and a command file that defines the commands to execute.
+You can find the templates in `./config/config-template` and `./cmd/cmd-template`, respectively.
+
+## Function Overview
+All functions expect `-u <user>`. The cluster selector is `-g` for Galvani or `-f` for Ferranti. The optional `-l 1|2` flag selects the login node and defaults to `1`.
+
+- `mlcloud-ln`: open an SSH session on a login node or run a command there.
+```sh
+mlcloud-ln -g -u <user>
+mlcloud-ln -f -u <user> -l 2 squeue --me
+```
+
+- `mlcloud-job`: submit a batch job using a settings file and either a command file or an inline command.
+```sh
+mlcloud-job -g -u <user> -o <path/to/config> -c <path/to/jupyter/cmd>
+mlcloud-job -f -u <user> -l 2 -o <path/to/config> python train.py
+```
+
+- `mlcloud-cn`: attach to the compute node of a queued or running job. With `-i`, start an interactive job first.
+```sh
+mlcloud-cn -g -u <user>
+mlcloud-cn -f -u <user> -l 2 -i
+```
+
+- `mlcloud-jupyter`: print the Jupyter URL from the job log and open the SSH tunnel to the compute node.
+```sh
+mlcloud-jupyter -g -u <user>
+mlcloud-jupyter -f -u <user> -l 2 my-job-name
+```
+
+- `mlcloud-sync`: copy files with `rsync`. Use `g:` or `f:` prefixes for remote paths.
+```sh
+mlcloud-sync -u <user> <client/path> g:<server/path> # client -> server
+mlcloud-sync -u <user> -l 2 f:<server/path> <client/path> # server -> client
+```
+
+## Jupyter Notebook
+To run Jupyter, create a command script like this:
+```sh
+<do stuff before running jupyter>
+jupyter-lab --no-browser --port 8080
+<do stuff after closing jupyter>
+```
+Then run it as a job, for example:
+```sh
+mlcloud-job -g -u <user> -o <path/to/config> -c <path/to/jupyter/cmd>
+```
+A job will be submitted.
+Now run:
+```sh
+mlcloud-jupyter -g -u <user> job-name
+```
+If there is only one running job, `job-name` can be omitted.
+This prints the Jupyter URL from the job log and opens the SSH tunnel to the compute node.

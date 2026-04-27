@@ -1,0 +1,364 @@
+#!/bin/sh
+
+
+generate-sbatch() {
+  local opt cmd_file settings_file
+
+  OPTIND=1
+  while getopts ":c:o:" opt; do
+    case "$opt" in
+      c) cmd_file="$OPTARG" ;;
+      o) settings_file="$OPTARG" ;;
+      *) echo "usage: generate-sbatch -o settings_file [-c cmd_file] [cmd ...]"; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  [[ -z "$settings_file" ]] && { echo "usage: generate-sbatch -o settings_file [-c cmd_file] [cmd ...]"; return 2; }
+  if [[ -n "$cmd_file" ]]; then
+    [ -f "$cmd_file" ] || { echo "cmd file missing"; return 1; }
+    [ "$#" -eq 0 ] || { echo "usage: generate-sbatch -o settings_file [-c cmd_file] [cmd ...]"; return 2; }
+  else
+    [ "$#" -eq 0 ] && { echo "no cmd"; return 1; }
+  fi
+
+  [ -f "$settings_file" ] || { echo "settings file missing"; return 1; }
+  source "$settings_file"
+
+  cat <<EOF
+#!/bin/bash
+
+# Job name
+#SBATCH --job-name=${JOB_NAME:-job-$(uuidgen | cut -d- -f1 | cut -c1-4)}
+
+# Number of tasks
+#SBATCH --ntasks=1
+
+# Number of CPU cores per task
+#SBATCH --cpus-per-task=${NUM_CPU:-8}
+
+# Ensure that all cores are on the same machine with nodes=1
+#SBATCH --nodes=1
+
+# Which partition will run your job
+#SBATCH --partition=${GPU:-"2080-galvani"}
+
+# Allowed runtime in D-HH:MM
+#SBATCH --time=${TIME:-"0-01:00"}
+
+# (optional) Requesting type and number of GPUs
+#SBATCH --gres=gpu:${NUM_GPU:-1}
+
+# Total memory pool for all cores (see also --mem-per-cpu); exceeding this number will cause your job to fail.
+#SBATCH --mem=${MEM:-32G}
+
+# File to which STDOUT will be written
+#SBATCH --output=${LOGDIR}/myjob-%j.out
+
+# File to which STDERR will be written
+#SBATCH --error=${LOGDIR}/myjob-%j.err
+
+# Type of email notification- BEGIN,END,FAIL,ALL
+#SBATCH --mail-type=ALL
+
+# Email to which notifications will be sent
+#SBATCH --mail-user=${EMAIL}
+
+EOF
+
+  if [[ -n "$cmd_file" ]]; then
+    cat "$cmd_file"
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+mlcloud-ln() {
+  local opt remote user target_host tty_flag target login_node=1
+
+  local GALVANI=(
+    [1]=galvani-login.mlcloud.uni-tuebingen.de
+    [2]=galvani-login2.mlcloud.uni-tuebingen.de
+  )
+
+  local FERRANTI=(
+    [1]=ferranti-login.mlcloud.uni-tuebingen.de
+    [2]=ferranti-login2.mlcloud.uni-tuebingen.de
+  )
+
+  OPTIND=1
+  while getopts ":gfu:l:t" opt; do
+    case "$opt" in
+      g) target="galvani" ;;
+      f) target="ferranti" ;;
+      u) user="$OPTARG" ;;
+      l) login_node="$OPTARG" ;;
+      t) tty_flag="-t" ;;
+      *) echo "usage: mlcloud-ln (-g|-f) -u user [-l 1|2] [-t] [remote_command ...]" >&2; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  case "$login_node" in
+    1|2) ;;
+    *) echo "login node must be 1 or 2" >&2; return 2 ;;
+  esac
+
+  case "$target" in
+    galvani) target_host="${GALVANI[$login_node]}" ;;
+    ferranti) target_host="${FERRANTI[$login_node]}" ;;
+  esac
+
+  [[ -z "$target_host" || -z "$user" ]] && { echo "usage: mlcloud-ln (-g|-f) -u user [-l 1|2] [-t] [remote_command ...]" >&2; return 2; }
+
+  remote="${user}@${target_host}"
+
+  if [[ $# -eq 0 ]]; then
+    ssh "$remote" $tty_flag -p 2221
+  else
+    ssh "$remote" $tty_flag -p 2221 "$@"
+  fi
+}
+
+mlcloud-job() {
+  local opt target user cmd_file settings_file login_node=1
+
+  OPTIND=1
+  while getopts ":gfu:l:c:o:" opt; do
+    case "$opt" in
+      g) target="-g" ;;
+      f) target="-f" ;;
+      u) user="$OPTARG" ;;
+      l) login_node="$OPTARG" ;;
+      c) cmd_file="$OPTARG" ;;
+      o) settings_file="$OPTARG" ;;
+      *) echo "usage: mlcloud-job (-g|-f) -u user -o settings_file [-l 1|2] [-c cmd_file] [cmd ...]"; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  case "$login_node" in
+    1|2) ;;
+    *) echo "login node must be 1 or 2" >&2; return 2 ;;
+  esac
+
+  [[ -z "$target" || -z "$user" || -z "$settings_file" ]] && { echo "usage: mlcloud-job (-g|-f) -u user -o settings_file [-l 1|2] [-c cmd_file] [cmd ...]"; return 2; }
+
+  if [[ -n "$cmd_file" ]]; then
+    [ "$#" -eq 0 ] || { echo "usage: mlcloud-job (-g|-f) -u user -o settings_file [-l 1|2] -c cmd_file"; return 2; }
+  else
+    [ "$#" -eq 0 ] && { echo "no cmd"; return 1; }
+  fi
+
+  if [[ -n "$cmd_file" ]]; then
+    generate-sbatch -o "$settings_file" -c "$cmd_file" | mlcloud-ln "$target" -u "$user" -l "$login_node" sbatch
+  else
+    generate-sbatch -o "$settings_file" "$@" | mlcloud-ln "$target" -u "$user" -l "$login_node" sbatch
+  fi
+}
+
+
+mlcloud-cn() {
+  local opt user interactive srun_window_name job_name login_node=1
+
+  OPTIND=1
+  while getopts ":gfu:l:i" opt; do
+    case "$opt" in
+      g)
+        target="-g"
+        prefix="galvani"
+        partition="2080-galvani"
+        ;;
+      f)
+        target="-f"
+        prefix="ferranti"
+        partition="h100-ferranti"
+        ;;
+      u) user="$OPTARG" ;;
+      l) login_node="$OPTARG" ;;
+      i) interactive=1 ;;
+      *) echo "usage: mlcloud-cn (-g|-f) -u user [-l 1|2] [-i] [node]"; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  case "$login_node" in
+    1|2) ;;
+    *) echo "login node must be 1 or 2" >&2; return 2 ;;
+  esac
+
+  [[ -z "$target" || -z "$user" ]] && { echo "usage: mlcloud-cn (-g|-f) -u user [-l 1|2] [-i] [node]"; return 2; }
+
+  if [[ -n "$interactive" ]]; then
+    job_name="job-$(uuidgen | cut -d- -f1 | cut -c1-4)"
+    srun_window_name="$job_name"
+    mlcloud-ln $target -u "$user" -l "$login_node" "bash -lc \"if tmux has-session -t mlcloud 2>/dev/null; then tmux new-window -t mlcloud -n \\\"$job_name\\\"; tmux send-keys -t \\\"mlcloud:$job_name\\\" \\\"srun --job-name '$job_name' --partition=$partition --ntasks=1 --nodes=1 --cpus-per-task=1 --gres=gpu:1 --time 0-01:00 --mem=4G --pty bash\\\" C-m; else tmux new-session -d -s mlcloud; tmux rename-window -t mlcloud:0 \\\"$job_name\\\"; tmux send-keys -t mlcloud:0 \\\"srun --job-name '$job_name' --partition=$partition --ntasks=1 --nodes=1 --cpus-per-task=1 --gres=gpu:1 --time 0-01:00 --mem=4G --pty bash\\\" C-m; fi\""
+    NODE_HOST=""
+  fi
+
+  if [ -z $1 ] || [[ -n "$interactive" ]]; then
+    local squeue_out
+    squeue_out="$(mlcloud-ln $target -u "$user" -l "$login_node" squeue --me -h)"
+    if [[ -z "$interactive" && -z "$(echo "$squeue_out" | tr -d '[:space:]')" ]]; then
+      echo "no jobs in queue; use -i to start an interactive job" >&2
+      return 1
+    fi
+    NODE_HOST=$(echo "$squeue_out" | awk 'NR==1{print $8}')
+    if [[ -z "$interactive" ]]; then
+      job_name=$(echo "$squeue_out" | awk 'NR==1{print $3}')
+    fi
+    while [[ -z "$NODE_HOST" ]]; do
+      NODE_HOST="$(
+        mlcloud-ln $target -u "$user" -l "$login_node" squeue --me -h | awk 'NR==1{print $8}'
+      )"
+
+      [[ -z "$NODE_HOST" ]] && sleep 2
+    done
+  else
+    job_name=$1
+    NODE_HOST=""
+    while [[ -z "$NODE_HOST" ]]; do
+      local squeue_out
+      squeue_out="$(mlcloud-ln $target -u "$user" -l "$login_node" squeue --me -h --name="$job_name")"
+      if [[ -z "$(echo "$squeue_out" | tr -d '[:space:]')" ]]; then
+        echo "job not found: $job_name" >&2
+        return 1
+      fi
+      NODE_HOST=$(echo "$squeue_out" | awk 'NR==1{print $8}')
+      [[ -z "$NODE_HOST" ]] && sleep 2
+    done
+  fi
+
+  mlcloud-ln $target -u "$user" -l "$login_node" "bash -lc \"if tmux list-sessions 2>/dev/null | grep -Fq mlcloud; then if [ -n '$job_name' ]; then if ! tmux list-windows -t mlcloud -F '#{window_name}' | grep -Fxq '$job_name'; then tmux new-window -t mlcloud -n '$job_name'; tmux send-keys -t mlcloud:'$job_name' \\\"ssh $user@$NODE_HOST\\\" C-m; fi; fi; else tmux new-session -d -s mlcloud; if [ -n '$job_name' ]; then tmux rename-window -t mlcloud:0 '$job_name'; tmux send-keys -t mlcloud:0 \\\"ssh $user@$NODE_HOST\\\" C-m; fi; fi\""
+
+  mlcloud-ln $target -u "$user" -l "$login_node" -t "bash -lc \"tmux has-session -t mlcloud 2>/dev/null && tmux attach -t mlcloud:'$job_name'\""
+}
+
+mlcloud-jupyter() {
+  local opt user job_name JOB_ID NODE_HOST squeue_out target prefix login_host login_node=1
+
+  local GALVANI=(
+    [1]=galvani-login.mlcloud.uni-tuebingen.de
+    [2]=galvani-login2.mlcloud.uni-tuebingen.de
+  )
+
+  local FERRANTI=(
+    [1]=ferranti-login.mlcloud.uni-tuebingen.de
+    [2]=ferranti-login2.mlcloud.uni-tuebingen.de
+  )
+
+  OPTIND=1
+  while getopts ":gfu:l:" opt; do
+    case "$opt" in
+      g)
+        target="-g"
+        prefix="galvani"
+        ;;
+      f)
+        target="-f"
+        prefix="ferranti"
+        ;;
+      u) user="$OPTARG" ;;
+      l) login_node="$OPTARG" ;;
+      *) echo "usage: mlcloud-jupyter (-g|-f) -u user [-l 1|2] [job_name]"; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  case "$login_node" in
+    1|2) ;;
+    *) echo "login node must be 1 or 2" >&2; return 2 ;;
+  esac
+
+  case "$target" in
+    -g) login_host="${GALVANI[$login_node]}" ;;
+    -f) login_host="${FERRANTI[$login_node]}" ;;
+  esac
+
+  [[ -z "$target" || -z "$user" || -z "$login_host" ]] && { echo "usage: mlcloud-jupyter (-g|-f) -u user [-l 1|2] [job_name]"; return 2; }
+
+  if [[ -z "$1" ]]; then
+    squeue_out="$(mlcloud-ln $target -u "$user" -l "$login_node" squeue --me -h)"
+    if [[ -z "$(echo "$squeue_out" | tr -d '[:space:]')" ]]; then
+      echo "no jobs in queue" >&2
+      return 1
+    fi
+    job_name=$(echo "$squeue_out" | awk 'NR==1{print $3}')
+    JOB_ID=$(echo "$squeue_out" | awk 'NR==1{print $1}')
+  else
+    job_name=$1
+  fi
+
+  NODE_HOST=""
+  while [[ -z "$NODE_HOST" ]]; do
+    squeue_out="$(mlcloud-ln $target -u "$user" -l "$login_node" squeue --me -h --name="$job_name")"
+    if [[ -z "$(echo "$squeue_out" | tr -d '[:space:]')" ]]; then
+      echo "job not found: $job_name" >&2
+      return 1
+    fi
+    JOB_ID=$(echo "$squeue_out" | awk 'NR==1{print $1}')
+    NODE_HOST=$(echo "$squeue_out" | awk 'NR==1{print $8}')
+    [[ -z "$NODE_HOST" ]] && sleep 2
+  done
+
+  JUPYTER_URL=$(mlcloud-ln $target -u "$user" -l "$login_node" "grep -E '^[[:space:]]*http://localhost:8080/' \$LOGDIR/myjob-${JOB_ID}.err" \
+    | sed 's/^[[:space:]]*//')
+  echo -e "\e[1;32m${JUPYTER_URL}\e[0m"
+
+  ssh -AtL 8080:localhost:8080 "$user@$login_host" -p 2221 "ssh -AtL 8080:localhost:8080 $user@$NODE_HOST bash"
+}
+
+mlcloud-sync() {
+  local opt user source target login_node=1
+  local src dst remote_count
+
+  local GALVANI=(
+    [1]=galvani-login.mlcloud.uni-tuebingen.de
+    [2]=galvani-login2.mlcloud.uni-tuebingen.de
+  )
+
+  local FERRANTI=(
+    [1]=ferranti-login.mlcloud.uni-tuebingen.de
+    [2]=ferranti-login2.mlcloud.uni-tuebingen.de
+  )
+
+  OPTIND=1
+  while getopts ":u:l:" opt; do
+    case "$opt" in
+      u) user="$OPTARG" ;;
+      l) login_node="$OPTARG" ;;
+      *) echo "usage: mlcloud-sync -u user [-l 1|2] <source> <target>"; return 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  source=$1
+  target=$2
+
+  case "$login_node" in
+    1|2) ;;
+    *) echo "login node must be 1 or 2" >&2; return 2 ;;
+  esac
+
+  [[ -z "$user" || -z "$source" || -z "$target" ]] && { echo "usage: mlcloud-sync -u user [-l 1|2] <source> <target>"; return 2; }
+
+  remote_count=0
+
+  case "$source" in
+    g:*) src="${user}@${GALVANI[$login_node]}:${source#g:}"; remote_count=$((remote_count + 1)) ;;
+    f:*) src="${user}@${FERRANTI[$login_node]}:${source#f:}"; remote_count=$((remote_count + 1)) ;;
+    *) src="$source" ;;
+  esac
+
+  case "$target" in
+    g:*) dst="${user}@${GALVANI[$login_node]}:${target#g:}"; remote_count=$((remote_count + 1)) ;;
+    f:*) dst="${user}@${FERRANTI[$login_node]}:${target#f:}"; remote_count=$((remote_count + 1)) ;;
+    *) dst="$target" ;;
+  esac
+
+  if [[ $remote_count -gt 0 ]]; then
+    rsync -av -e 'ssh -p 2221' "$src" "$dst"
+  else
+    rsync -av "$src" "$dst"
+  fi
+}

@@ -1,0 +1,7 @@
+cmd/*
+config/*
+
+!cmd/cmd-template
+!config/config-template
+
+.DS_Store

@@ -1,0 +1,10 @@
+USER=<mlcloud-user>
+GROUP=<mlcloud-group>
+EMAIL=<user-email>
+LOGDIR=<logs/path>
+
+TIME=
+NUM_CPU=
+MEM=
+GPU=
+NUM_GPU=
