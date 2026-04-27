@@ -1,5 +1,5 @@
 # MLCLOUD
-Scripts for using the MLCloud cluster with JupyterLab.
+Script for interacting with the MLCloud cluster.
 https://portal.mlcloud.uni-tuebingen.de/user-guide/
 
 ## Server Setup
